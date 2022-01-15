@@ -5,7 +5,7 @@ import os
 import sys
 import json
 import shutil
-import pathlib
+import asyncio
 import getpass
 import logging
 import argparse
@@ -14,7 +14,7 @@ import traceback
 from html import escape
 from random import random
 from lxml import html, etree
-from multiprocessing import Process, Queue, Value
+from multiprocessing import Queue, Value
 from urllib.parse import urljoin, urlparse, parse_qs, quote_plus
 
 
@@ -30,10 +30,6 @@ ORLY_BASE_URL = "https://www." + ORLY_BASE_HOST
 SAFARI_BASE_URL = "https://" + SAFARI_BASE_HOST
 API_ORIGIN_URL = "https://" + API_ORIGIN_HOST
 PROFILE_URL = SAFARI_BASE_URL + "/profile/"
-
-# DEBUG
-USE_PROXY = False
-PROXIES = {"https": "https://127.0.0.1:8080"}
 
 
 class Display:
@@ -138,20 +134,20 @@ class Display:
 
     def intro(self):
         output = self.SH_YELLOW + ("""
-       ____     ___         _
-      / __/__ _/ _/__ _____(_)
-     _\ \/ _ `/ _/ _ `/ __/ /
-    /___/\_,_/_/ \_,_/_/ /_/
-      / _ )___  ___  / /__ ___
-     / _  / _ \/ _ \/  '_/(_-<
-    /____/\___/\___/_/\_\/___/
+       ____     ___         _     
+      / __/__ _/ _/__ _____(_)    
+     _\ \/ _ `/ _/ _ `/ __/ /     
+    /___/\_,_/_/ \_,_/_/ /_/      
+      / _ )___  ___  / /__ ___    
+     / _  / _ \/ _ \/  '_/(_-<    
+    /____/\___/\___/_/\_\/___/    
 """ if random() > 0.5 else """
- ██████╗     ██████╗ ██╗  ██╗   ██╗██████╗
+ ██████╗     ██████╗ ██╗  ██╗   ██╗██████╗ 
 ██╔═══██╗    ██╔══██╗██║  ╚██╗ ██╔╝╚════██╗
 ██║   ██║    ██████╔╝██║   ╚████╔╝   ▄███╔╝
-██║   ██║    ██╔══██╗██║    ╚██╔╝    ▀▀══╝
-╚██████╔╝    ██║  ██║███████╗██║     ██╗
- ╚═════╝     ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝
+██║   ██║    ██╔══██╗██║    ╚██╔╝    ▀▀══╝ 
+╚██████╔╝    ██║  ██║███████╗██║     ██╗   
+ ╚═════╝     ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝                                           
 """) + self.SH_DEFAULT
         output += "\n" + "~" * (self.columns // 2)
 
@@ -160,7 +156,7 @@ class Display:
     def parse_description(self, desc):
         if not desc:
             return "n/d"
-
+        
         try:
             return html.fromstring(desc).text_content()
 
@@ -169,15 +165,15 @@ class Display:
             return "n/d"
 
     def book_info(self, info):
-        description = self.parse_description(info.get("description", None)).replace("\n", " ")
+        description = self.parse_description(info["description"]).replace("\n", " ")
         for t in [
-            ("Title", info.get("title", "")), ("Authors", ", ".join(aut.get("name", "") for aut in info.get("authors", []))),
-            ("Identifier", info.get("identifier", "")), ("ISBN", info.get("isbn", "")),
-            ("Publishers", ", ".join(pub.get("name", "") for pub in info.get("publishers", []))),
+            ("Title", info["title"]), ("Authors", ", ".join(aut["name"] for aut in info["authors"])),
+            ("Identifier", info["identifier"]), ("ISBN", info["isbn"]),
+            ("Publishers", ", ".join(pub["name"] for pub in info["publishers"])),
             ("Rights", info.get("rights", "")),
             ("Description", description[:500] + "..." if len(description) >= 500 else description),
-            ("Release Date", info.get("issued", "")),
-            ("URL", info.get("web_url", ""))
+            ("Release Date", info["issued"]),
+            ("URL", info["web_url"])
         ]:
             self.info("{0}{1}{2}: {3}".format(self.SH_YELLOW, t[0], self.SH_DEFAULT, t[1]), True)
 
@@ -216,14 +212,6 @@ class Display:
         return message
 
 
-class WinQueue(list):  # TODO: error while use `process` in Windows: can't pickle _thread.RLock objects
-    def put(self, el):
-        self.append(el)
-
-    def qsize(self):
-        return self.__len__()
-
-
 class SafariBooks:
     LOGIN_URL = ORLY_BASE_URL + "/member/auth/login/"
     LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
@@ -239,10 +227,11 @@ class SafariBooks:
                    "<head>\n" \
                    "{0}\n" \
                    "<style type=\"text/css\">" \
-                   "body{{margin:1em;background-color:transparent!important;}}" \
+                   "body{{margin:1em;}}" \
                    "#sbo-rt-content *{{text-indent:0pt!important;}}#sbo-rt-content .bq{{margin-right:1em!important;}}"
 
-    KINDLE_HTML = "#sbo-rt-content *{{word-wrap:break-word!important;" \
+    KINDLE_HTML = "body{{background-color:transparent!important;}}" \
+                  "#sbo-rt-content *{{word-wrap:break-word!important;" \
                   "word-break:break-word!important;}}#sbo-rt-content table,#sbo-rt-content pre" \
                   "{{overflow-x:unset!important;overflow:unset!important;" \
                   "overflow-y:unset!important;white-space:pre-wrap!important;}}"
@@ -299,12 +288,13 @@ class SafariBooks:
               "</ncx>"
 
     HEADERS = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
-        "Referer": LOGIN_ENTRY_URL,
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/90.0.4430.212 Safari/537.36"
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "accept-encoding": "gzip, deflate",
+        "origin": SAFARI_BASE_URL,
+        "referer": LOGIN_ENTRY_URL,
+        "upgrade-insecure-requests": "1",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/60.0.3112.113 Safari/537.36"
     }
 
     COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
@@ -315,17 +305,13 @@ class SafariBooks:
         self.display.intro()
 
         self.session = requests.Session()
-        if USE_PROXY:  # DEBUG
-            self.session.proxies = PROXIES
-            self.session.verify = False
-
         self.session.headers.update(self.HEADERS)
 
         self.jwt = {}
 
         if not args.cred:
             if not os.path.isfile(COOKIES_FILE):
-                self.display.exit("Login: unable to find `cookies.json` file.\n"
+                self.display.exit("Login: unable to find cookies file.\n"
                                   "    Please use the `--cred` or `--login` options to perform the login.")
 
             self.session.cookies.update(json.load(open(COOKIES_FILE)))
@@ -371,17 +357,16 @@ class SafariBooks:
 
         self.chapter_title = ""
         self.filename = ""
-        self.chapter_stylesheets = []
         self.css = []
         self.images = []
 
         self.display.info("Downloading book contents... (%s chapters)" % len(self.book_chapters), state=True)
-        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if not args.kindle else "") + self.BASE_02_HTML
+        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if not args.no_kindle else "") + self.BASE_02_HTML
 
         self.cover = False
         self.get()
         if not self.cover:
-            self.cover = self.get_default_cover() if "cover" in self.book_info else False
+            self.cover = self.get_default_cover()
             cover_html = self.parse_html(
                 html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), True
             )
@@ -394,10 +379,10 @@ class SafariBooks:
             self.filename = self.book_chapters[0]["filename"]
             self.save_page_html(cover_html)
 
-        self.css_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
+        self.css_done_queue = Queue(0) 
         self.display.info("Downloading book CSSs... (%s files)" % len(self.css), state=True)
         self.collect_css()
-        self.images_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
+        self.images_done_queue = Queue(0) 
         self.display.info("Downloading book images... (%s files)" % len(self.images), state=True)
         self.collect_images()
 
@@ -521,11 +506,8 @@ class SafariBooks:
         if response == 0:
             self.display.exit("Login: unable to reach Safari Books Online. Try again...")
 
-        elif response.status_code != 200:
+        if response.status_code != 200:
             self.display.exit("Authentication issue: unable to access profile page.")
-
-        elif "user_type\":\"Expired\"" in response.text:
-            self.display.exit("Authentication issue: account subscription expired.")
 
         self.display.info("Successfully authenticated.", state=True)
 
@@ -540,7 +522,7 @@ class SafariBooks:
 
         if "last_chapter_read" in response:
             del response["last_chapter_read"]
-
+            
         for key, value in response.items():
             if value is None:
                 response[key] = 'n/a'
@@ -609,15 +591,16 @@ class SafariBooks:
     def url_is_absolute(url):
         return bool(urlparse(url).netloc)
 
-    @staticmethod
-    def is_image_link(url: str):
-        return pathlib.Path(url).suffix[1:].lower() in ["jpg", "jpeg", "png", "gif"]
-
     def link_replace(self, link):
         if link and not link.startswith("mailto"):
             if not self.url_is_absolute(link):
-                if any(x in link for x in ["cover", "images", "graphics"]) or \
-                        self.is_image_link(link):
+                if "cover" in link or "images" in link or "graphics" in link or \
+                        link[-3:] in ["jpg", "peg", "png", "gif"]:
+                    link = urljoin(self.base_url, link)
+                    if link not in self.images:
+                        self.images.append(link)
+                        self.display.log("Crawler: found a new image at %s" % link)
+
                     image = link.split("/")[-1]
                     return "Images/" + image
 
@@ -665,17 +648,9 @@ class SafariBooks:
             )
 
         page_css = ""
-        if len(self.chapter_stylesheets):
-            for chapter_css_url in self.chapter_stylesheets:
-                if chapter_css_url not in self.css:
-                    self.css.append(chapter_css_url)
-                    self.display.log("Crawler: found a new CSS at %s" % chapter_css_url)
-
-                page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
-                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(self.css.index(chapter_css_url))
-
         stylesheet_links = root.xpath("//link[@rel='stylesheet']")
         if len(stylesheet_links):
+            stylesheet_count = 0
             for s in stylesheet_links:
                 css_url = urljoin("https:", s.attrib["href"]) if s.attrib["href"][:2] == "//" \
                     else urljoin(self.base_url, s.attrib["href"])
@@ -685,7 +660,8 @@ class SafariBooks:
                     self.display.log("Crawler: found a new CSS at %s" % css_url)
 
                 page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
-                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(self.css.index(css_url))
+                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(stylesheet_count)
+                stylesheet_count += 1
 
         stylesheets = root.xpath("//style")
         if len(stylesheets):
@@ -759,7 +735,7 @@ class SafariBooks:
             elif "win" in sys.platform:
                 dirname = dirname.replace(":", ",")
 
-        for ch in ['~', '#', '%', '&', '*', '{', '}', '\\', '<', '>', '?', '/', '`', '\'', '"', '|', '+', ':']:
+        for ch in ['~', '#', '%', '&', '*', '{', '}', '\\', '<', '>', '?', '/', '`', '\'', '"', '|', '+']:
             if ch in dirname:
                 dirname = dirname.replace(ch, "_")
 
@@ -812,36 +788,19 @@ class SafariBooks:
             self.chapter_title = next_chapter["title"]
             self.filename = next_chapter["filename"]
 
-            asset_base_url = next_chapter['asset_base_url']
-            api_v2_detected = False
-            if 'v2' in next_chapter['content']:
-                asset_base_url = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{}/files".format(self.book_id)
-                api_v2_detected = True
-
-            if "images" in next_chapter and len(next_chapter["images"]):
-                for img_url in next_chapter['images']:
-                    if api_v2_detected:
-                        self.images.append(asset_base_url + '/' + img_url)
-                    else:
-                        self.images.append(urljoin(next_chapter['asset_base_url'], img_url))
-
-
-            # Stylesheets
-            self.chapter_stylesheets = []
-            if "stylesheets" in next_chapter and len(next_chapter["stylesheets"]):
-                self.chapter_stylesheets.extend(x["url"] for x in next_chapter["stylesheets"])
-
-            if "site_styles" in next_chapter and len(next_chapter["site_styles"]):
-                self.chapter_stylesheets.extend(next_chapter["site_styles"])
-
             if os.path.isfile(os.path.join(self.BOOK_PATH, "OEBPS", self.filename.replace(".html", ".xhtml"))):
                 if not self.display.book_ad_info and \
                         next_chapter not in self.book_chapters[:self.book_chapters.index(next_chapter)]:
                     self.display.info(
                         ("File `%s` already exists.\n"
-                         "    If you want to download again all the book,\n"
+                         "    If you want to download again all the book%s,\n"
                          "    please delete the output directory '" + self.BOOK_PATH + "' and restart the program.")
-                         % self.filename.replace(".html", ".xhtml")
+                        %
+                        (
+                            self.filename.replace(".html", ".xhtml"),
+                            " (especially because you selected the `--no-kindle` option)"
+                            if self.args.no_kindle else ""
+                        )
                     )
                     self.display.book_ad_info = 2
 
@@ -872,7 +831,6 @@ class SafariBooks:
         self.css_done_queue.put(1)
         self.display.state(len(self.css), self.css_done_queue.qsize())
 
-
     def _thread_download_images(self, url):
         image_name = url.split("/")[-1]
         image_path = os.path.join(self.images_path, image_name)
@@ -898,38 +856,25 @@ class SafariBooks:
         self.images_done_queue.put(1)
         self.display.state(len(self.images), self.images_done_queue.qsize())
 
-    def _start_multiprocessing(self, operation, full_queue):
-        if len(full_queue) > 5:
-            for i in range(0, len(full_queue), 5):
-                self._start_multiprocessing(operation, full_queue[i:i + 5])
 
-        else:
-            process_queue = [Process(target=operation, args=(arg,)) for arg in full_queue]
-            for proc in process_queue:
-                proc.start()
+    def _start_parallel_download(self, operation, work):
+        loop = asyncio.get_event_loop()
+        futures = [loop.run_in_executor(None, operation, job) for job in work]
+        loop.run_until_complete(asyncio.gather(*futures))
 
-            for proc in process_queue:
-                proc.join()
 
     def collect_css(self):
         self.display.state_status.value = -1
-
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
-        for css_url in self.css:
-            self._thread_download_css(css_url)
+        self._start_parallel_download(self._thread_download_css, self.css)
 
     def collect_images(self):
         if self.display.book_ad_info == 2:
             self.display.info("Some of the book contents were already downloaded.\n"
                               "    If you want to be sure that all the images will be downloaded,\n"
-                              "    please delete the output directory '" + self.BOOK_PATH +
+                              "    please delete the output direcotry '" + self.BOOK_PATH +
                               "' and restart the program.")
-
         self.display.state_status.value = -1
-
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
-        for image_url in self.images:
-            self._thread_download_images(image_url)
+        self._start_parallel_download(self._thread_download_images, self.images)
 
     def create_content_opf(self):
         self.css = next(os.walk(self.css_path))[2]
@@ -958,21 +903,21 @@ class SafariBooks:
                             "media-type=\"text/css\" />".format(i))
 
         authors = "\n".join("<dc:creator opf:file-as=\"{0}\" opf:role=\"aut\">{0}</dc:creator>".format(
-            escape(aut.get("name", "n/d"))
-        ) for aut in self.book_info.get("authors", []))
+            escape(aut["name"])
+        ) for aut in self.book_info["authors"])
 
-        subjects = "\n".join("<dc:subject>{0}</dc:subject>".format(escape(sub.get("name", "n/d")))
-                             for sub in self.book_info.get("subjects", []))
+        subjects = "\n".join("<dc:subject>{0}</dc:subject>".format(escape(sub["name"]))
+                             for sub in self.book_info["subjects"])
 
         return self.CONTENT_OPF.format(
-            (self.book_info.get("isbn",  self.book_id)),
+            (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             escape(self.book_title),
             authors,
-            escape(self.book_info.get("description", "")),
+            escape(self.book_info["description"]),
             subjects,
-            ", ".join(escape(pub.get("name", "")) for pub in self.book_info.get("publishers", [])),
+            ", ".join(escape(pub["name"]) for pub in self.book_info["publishers"]),
             escape(self.book_info.get("rights", "")),
-            self.book_info.get("issued", ""),
+            self.book_info["issued"],
             self.cover,
             "\n".join(manifest),
             "\n".join(spine),
@@ -1023,7 +968,7 @@ class SafariBooks:
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,
             self.book_title,
-            ", ".join(aut.get("name", "") for aut in self.book_info.get("authors", [])),
+            ", ".join(aut["name"] for aut in self.book_info["authors"]),
             navmap
         )
 
@@ -1078,9 +1023,9 @@ if __name__ == "__main__":
         help="Prevent your session data to be saved into `cookies.json` file."
     )
     arguments.add_argument(
-        "--kindle", dest="kindle", action='store_true',
-        help="Add some CSS rules that block overflow on `table` and `pre` elements."
-             " Use this option if you're going to export the EPUB to E-Readers like Amazon Kindle."
+        "--no-kindle", dest="no_kindle", action='store_true',
+        help="Remove some CSS rules that block overflow on `table` and `pre` elements."
+             " Use this option if you're not going to export the EPUB to E-Readers like Amazon Kindle."
     )
     arguments.add_argument(
         "--preserve-log", dest="log", action='store_true', help="Leave the `info_XXXXXXXXXXXXX.log`"
@@ -1094,6 +1039,7 @@ if __name__ == "__main__":
     )
 
     args_parsed = arguments.parse_args()
+
     if args_parsed.cred or args_parsed.login:
         user_email = ""
         pre_cred = ""
